@@ -22,6 +22,7 @@ On most Linux distributions (including Zorin, Ubuntu, Mint), enabling a Wi-Fi ho
 
 ---
 
+
 ## ✨ Features
 
 | Feature                            | Description                                                 |
