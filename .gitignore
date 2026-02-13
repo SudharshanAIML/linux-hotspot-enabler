@@ -1,0 +1,23 @@
+# ── Build artifacts ──────────────────────────────────────
+build/
+hotspot-enabler
+*.o
+*.d
+
+# ── Editor / IDE files ──────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── Runtime / temp files ────────────────────────────────
+/tmp/hotspot_enabler_*
+*.log
+*.pid
+*.leases
+
+# ── System files ────────────────────────────────────────
+core
+core.*
