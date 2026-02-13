@@ -44,16 +44,49 @@ void hotspot_init(HotspotStatus *status)
 /*
  * Auto-detect band from channel number:
  *   Channels 1-14   → 2.4 GHz (hw_mode=g)
- *   Channels 32-177  → 5 GHz   (hw_mode=a)
- *
- * With AP/STA concurrency on a single radio, the AP MUST use the
- * same channel (and therefore same band) as the client connection.
- * There is no manual 5GHz toggle — it's physically determined by
- * which channel the client is connected on.
+ *   Channels 32+    → 5 GHz   (hw_mode=a)
  */
 static bool is_5ghz_channel(int ch)
 {
     return (ch >= 32);
+}
+
+/*
+ * Get the regulatory country code from the system.
+ * Falls back to "US" if detection fails.
+ */
+static void get_country_code(char *cc, size_t cc_size)
+{
+    char output[256] = {0};
+
+    /* Try iw reg get — works on most distros */
+    if (net_exec_cmd("iw reg get 2>/dev/null | grep -oP 'country \\K[A-Z]{2}' | head -1",
+                     output, sizeof(output))) {
+        /* Trim whitespace/newlines */
+        char *p = output;
+        while (*p && *p != '\n' && *p != '\r' && *p != ' ') p++;
+        *p = '\0';
+        if (strlen(output) == 2) {
+            strncpy(cc, output, cc_size - 1);
+            return;
+        }
+    }
+
+    /* Fallback: try locale-based detection */
+    output[0] = '\0';
+    if (net_exec_cmd("locale | grep -oP 'LC_ALL=.*?\\K[A-Z]{2}' 2>/dev/null | head -1",
+                     output, sizeof(output))) {
+        char *p = output;
+        while (*p && *p != '\n') p++;
+        *p = '\0';
+        if (strlen(output) == 2) {
+            strncpy(cc, output, cc_size - 1);
+            return;
+        }
+    }
+
+    /* Default fallback */
+    strncpy(cc, "US", cc_size - 1);
 }
 
 static bool generate_hostapd_conf(const HotspotStatus *status)
@@ -71,13 +104,18 @@ static bool generate_hostapd_conf(const HotspotStatus *status)
     bool use_5ghz = is_5ghz_channel(channel);
     const char *hw_mode = use_5ghz ? "a" : "g";
 
+    /* Detect country code from system regulatory domain */
+    char country[4] = {0};
+    get_country_code(country, sizeof(country));
+
     fprintf(fp,
         "interface=%s\n"
         "driver=nl80211\n"
         "ssid=%s\n"
         "hw_mode=%s\n"
         "channel=%d\n"
-        "wmm_enabled=0\n"
+        "country_code=%s\n"
+        "ieee80211d=1\n"
         "macaddr_acl=0\n"
         "auth_algs=1\n"
         "ignore_broadcast_ssid=%d\n"
@@ -90,15 +128,19 @@ static bool generate_hostapd_conf(const HotspotStatus *status)
         status->config.ssid,
         hw_mode,
         channel,
+        country,
         status->config.hidden ? 1 : 0,
         status->config.password
     );
 
     if (use_5ghz) {
+        /* 802.11ac (WiFi 5) — WMM is MANDATORY for AC mode */
         fprintf(fp, "ieee80211ac=1\n");
-        /* Regulatory: required for 5 GHz DFS channels */
-        fprintf(fp, "country_code=US\n");
-        fprintf(fp, "ieee80211d=1\n");
+        fprintf(fp, "wmm_enabled=1\n");
+        /* VHT capabilities for better 5GHz performance */
+        fprintf(fp, "vht_oper_chwidth=0\n");  /* 20/40 MHz */
+    } else {
+        fprintf(fp, "wmm_enabled=0\n");
     }
 
     fclose(fp);
@@ -332,34 +374,100 @@ static void remove_nat(HotspotStatus *status)
     }
 }
 
+/* ── Prepare AP interface for hostapd ────────────────────────────────── */
+
+/*
+ * On many distros, wpa_supplicant or iwd may attach to the ap0
+ * interface before hostapd can. hostapd requires exclusive nl80211
+ * access AND the interface to be DOWN.
+ *
+ * IMPORTANT: We must NOT use "pkill -f wpa_supplicant" because on
+ * Arch/Manjaro/etc, a single wpa_supplicant process manages ALL
+ * interfaces. Killing it would drop the WiFi client connection.
+ * Instead, we use wpa_cli to detach only the ap0 interface.
+ */
+static void prepare_for_hostapd(const char *ap_iface)
+{
+    char cmd[MAX_CMD_LEN];
+
+    /* Safely detach wpa_supplicant from ap0 only (not kill it) */
+    snprintf(cmd, sizeof(cmd),
+             "wpa_cli -i %s disconnect 2>/dev/null", ap_iface);
+    net_exec_silent(cmd);
+    snprintf(cmd, sizeof(cmd),
+             "wpa_cli -i %s terminate 2>/dev/null", ap_iface);
+    net_exec_silent(cmd);
+
+    /* Remove wpa_supplicant control socket for ap0 if it exists */
+    snprintf(cmd, sizeof(cmd),
+             "rm -f /var/run/wpa_supplicant/%s 2>/dev/null", ap_iface);
+    net_exec_silent(cmd);
+    snprintf(cmd, sizeof(cmd),
+             "rm -f /run/wpa_supplicant/%s 2>/dev/null", ap_iface);
+    net_exec_silent(cmd);
+
+    /* Re-tell NM to unmanage (it may have re-grabbed after creation) */
+    snprintf(cmd, sizeof(cmd),
+             "nmcli device set %s managed no 2>/dev/null", ap_iface);
+    net_exec_silent(cmd);
+
+    /* Bring interface DOWN — hostapd needs it DOWN to initialize */
+    snprintf(cmd, sizeof(cmd), "ip link set %s down 2>/dev/null", ap_iface);
+    net_exec_silent(cmd);
+
+    /* Wait for interface to be fully released */
+    usleep(500000); /* 0.5 seconds */
+}
+
 /* ── Start hostapd ───────────────────────────────────────────────────── */
 
 static bool start_hostapd(HotspotStatus *status)
 {
     char cmd[MAX_CMD_LEN];
+    char log_output[MAX_CMD_LEN] = {0};
+    int max_attempts = 3;
 
-    /* hostapd brings the interface up itself */
-    snprintf(cmd, sizeof(cmd),
-             "hostapd -B %s -f %s",
-             HOSTAPD_CONF_PATH, HOSTAPD_LOG_PATH);
+    for (int attempt = 1; attempt <= max_attempts; attempt++) {
+        /* Ensure nothing else is using the interface */
+        prepare_for_hostapd(status->ap_iface);
 
-    if (net_exec_silent(cmd) != 0) {
-        char log_output[512] = {0};
-        snprintf(cmd, sizeof(cmd), "tail -5 %s 2>/dev/null", HOSTAPD_LOG_PATH);
+        /* hostapd brings the interface up itself */
+        snprintf(cmd, sizeof(cmd),
+                 "hostapd -B %s -f %s",
+                 HOSTAPD_CONF_PATH, HOSTAPD_LOG_PATH);
+
+        if (net_exec_silent(cmd) == 0) {
+            /* Give hostapd time to initialize */
+            usleep(1500000); /* 1.5 seconds */
+
+            char output[64] = {0};
+            net_exec_cmd("pidof hostapd", output, sizeof(output));
+            status->hostapd_pid = atoi(output);
+
+            if (status->hostapd_pid > 0)
+                return true;
+        }
+
+        /* Failed — read log for diagnostics */
+        log_output[0] = '\0';
+        snprintf(cmd, sizeof(cmd), "tail -3 %s 2>/dev/null", HOSTAPD_LOG_PATH);
         net_exec_cmd(cmd, log_output, sizeof(log_output));
-        snprintf(status->error_msg, sizeof(status->error_msg),
-                 "hostapd failed: %.400s", log_output);
-        return false;
+
+        if (attempt < max_attempts) {
+            /* Kill any partial hostapd and retry */
+            net_exec_silent("pkill hostapd 2>/dev/null");
+            usleep(1000000); /* 1 second before retry */
+        }
     }
 
-    /* Give hostapd time to initialize and bring interface up */
-    usleep(1500000); /* 1.5 seconds */
-
-    char output[64] = {0};
-    net_exec_cmd("pidof hostapd", output, sizeof(output));
-    status->hostapd_pid = atoi(output);
-
-    return (status->hostapd_pid > 0);
+    /* All attempts failed — set detailed error message */
+    /* Strip newlines from log output for cleaner TUI display */
+    for (char *p = log_output; *p; p++) {
+        if (*p == '\n') *p = ' ';
+    }
+    snprintf(status->error_msg, sizeof(status->error_msg),
+             "hostapd failed after %d attempts: %.350s", max_attempts, log_output);
+    return false;
 }
 
 /* ── Start dnsmasq ───────────────────────────────────────────────────── */
