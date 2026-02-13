@@ -89,7 +89,7 @@ static void get_country_code(char *cc, size_t cc_size)
     strncpy(cc, "US", cc_size - 1);
 }
 
-static bool generate_hostapd_conf(const HotspotStatus *status)
+static bool generate_hostapd_conf(const HotspotStatus *status, bool minimal)
 {
     FILE *fp = fopen(HOSTAPD_CONF_PATH, "w");
     if (!fp) return false;
@@ -108,6 +108,11 @@ static bool generate_hostapd_conf(const HotspotStatus *status)
     char country[4] = {0};
     get_country_code(country, sizeof(country));
 
+    /*
+     * Core hostapd config — kept minimal for maximum driver compatibility.
+     * On some adapters (especially with AP/STA concurrency), advanced
+     * features like 802.11n/ac can cause initialization failures.
+     */
     fprintf(fp,
         "interface=%s\n"
         "driver=nl80211\n"
@@ -116,31 +121,30 @@ static bool generate_hostapd_conf(const HotspotStatus *status)
         "channel=%d\n"
         "country_code=%s\n"
         "ieee80211d=1\n"
+        "wmm_enabled=%d\n"
         "macaddr_acl=0\n"
         "auth_algs=1\n"
         "ignore_broadcast_ssid=%d\n"
         "wpa=2\n"
         "wpa_passphrase=%s\n"
         "wpa_key_mgmt=WPA-PSK\n"
-        "rsn_pairwise=CCMP\n"
-        "ieee80211n=1\n",
+        "rsn_pairwise=CCMP\n",
         status->ap_iface,
         status->config.ssid,
         hw_mode,
         channel,
         country,
+        use_5ghz ? 1 : 0,   /* WMM mandatory for 5GHz */
         status->config.hidden ? 1 : 0,
         status->config.password
     );
 
-    if (use_5ghz) {
-        /* 802.11ac (WiFi 5) — WMM is MANDATORY for AC mode */
-        fprintf(fp, "ieee80211ac=1\n");
-        fprintf(fp, "wmm_enabled=1\n");
-        /* VHT capabilities for better 5GHz performance */
-        fprintf(fp, "vht_oper_chwidth=0\n");  /* 20/40 MHz */
-    } else {
-        fprintf(fp, "wmm_enabled=0\n");
+    /* Only add 802.11n/ac if NOT in minimal fallback mode */
+    if (!minimal) {
+        fprintf(fp, "ieee80211n=1\n");
+        if (use_5ghz) {
+            fprintf(fp, "ieee80211ac=1\n");
+        }
     }
 
     fclose(fp);
@@ -421,52 +425,128 @@ static void prepare_for_hostapd(const char *ap_iface)
 
 /* ── Start hostapd ───────────────────────────────────────────────────── */
 
+/*
+ * Attempt a single hostapd start. Returns true if hostapd is running.
+ */
+static bool try_hostapd_once(HotspotStatus *status, char *log_out, size_t log_sz)
+{
+    char cmd[MAX_CMD_LEN];
+
+    prepare_for_hostapd(status->ap_iface);
+
+    snprintf(cmd, sizeof(cmd),
+             "hostapd -B %s -f %s",
+             HOSTAPD_CONF_PATH, HOSTAPD_LOG_PATH);
+
+    if (net_exec_silent(cmd) == 0) {
+        usleep(2000000); /* 2 seconds for init */
+
+        char output[64] = {0};
+        net_exec_cmd("pidof hostapd", output, sizeof(output));
+        status->hostapd_pid = atoi(output);
+
+        if (status->hostapd_pid > 0)
+            return true;
+    }
+
+    /* Failed — capture error lines from log */
+    log_out[0] = '\0';
+    snprintf(cmd, sizeof(cmd),
+             "grep -iE 'Could not|FAIL|Error|refused' %s 2>/dev/null | tail -2",
+             HOSTAPD_LOG_PATH);
+    net_exec_cmd(cmd, log_out, log_sz);
+
+    if (strlen(log_out) == 0) {
+        snprintf(cmd, sizeof(cmd), "tail -2 %s 2>/dev/null", HOSTAPD_LOG_PATH);
+        net_exec_cmd(cmd, log_out, log_sz);
+    }
+
+    net_exec_silent("pkill hostapd 2>/dev/null");
+    usleep(500000);
+    return false;
+}
+
 static bool start_hostapd(HotspotStatus *status)
 {
     char cmd[MAX_CMD_LEN];
     char log_output[MAX_CMD_LEN] = {0};
-    int max_attempts = 3;
+    int client_channel = status->wifi.channel;
+    bool is_5ghz = is_5ghz_channel(client_channel);
 
-    for (int attempt = 1; attempt <= max_attempts; attempt++) {
-        /* Ensure nothing else is using the interface */
-        prepare_for_hostapd(status->ap_iface);
+    /* Set regulatory domain before starting hostapd */
+    char country[4] = {0};
+    get_country_code(country, sizeof(country));
+    snprintf(cmd, sizeof(cmd), "iw reg set %s 2>/dev/null", country);
+    net_exec_silent(cmd);
+    usleep(200000);
 
-        /* hostapd brings the interface up itself */
-        snprintf(cmd, sizeof(cmd),
-                 "hostapd -B %s -f %s",
-                 HOSTAPD_CONF_PATH, HOSTAPD_LOG_PATH);
+    /*
+     * Three-phase startup strategy:
+     *
+     *   Phase 1: Full config (802.11n/ac) on client's channel
+     *   Phase 2: Minimal config (basic) on client's channel
+     *   Phase 3: Fallback to 2.4 GHz channel 6
+     *            (only if client is on 5GHz and driver blocks AP on 5GHz)
+     *
+     * The "Could not select hw_mode and channel" error (-3) means
+     * the driver/regulatory domain blocks AP on the requested channel.
+     * When detected, we skip directly to Phase 3.
+     */
 
-        if (net_exec_silent(cmd) == 0) {
-            /* Give hostapd time to initialize */
-            usleep(1500000); /* 1.5 seconds */
+    /* ── Phase 1: Full config on client's channel ──────────────────── */
+    generate_hostapd_conf(status, false);
+    if (try_hostapd_once(status, log_output, sizeof(log_output)))
+        return true;
 
-            char output[64] = {0};
-            net_exec_cmd("pidof hostapd", output, sizeof(output));
-            status->hostapd_pid = atoi(output);
+    /* Check if it's a channel/hw_mode rejection — skip to 2.4GHz */
+    bool channel_rejected = (strstr(log_output, "Could not select") != NULL);
 
-            if (status->hostapd_pid > 0)
-                return true;
+    if (!channel_rejected) {
+        /* ── Phase 2: Minimal config on client's channel ───────────── */
+        generate_hostapd_conf(status, true);
+        if (try_hostapd_once(status, log_output, sizeof(log_output)))
+            return true;
+
+        channel_rejected = (strstr(log_output, "Could not select") != NULL);
+    }
+
+    /* ── Phase 3: 2.4GHz fallback (only if 5GHz was rejected) ──────── */
+    if (channel_rejected && is_5ghz) {
+        /* Override channel to 2.4GHz channel 6 */
+        int saved_channel = status->config.channel;
+        status->config.channel = 6;
+
+        /* Try full config on 2.4GHz */
+        generate_hostapd_conf(status, false);
+        if (try_hostapd_once(status, log_output, sizeof(log_output))) {
+            status->config.channel = saved_channel;
+            return true;
         }
 
-        /* Failed — read log for diagnostics */
-        log_output[0] = '\0';
-        snprintf(cmd, sizeof(cmd), "tail -3 %s 2>/dev/null", HOSTAPD_LOG_PATH);
-        net_exec_cmd(cmd, log_output, sizeof(log_output));
-
-        if (attempt < max_attempts) {
-            /* Kill any partial hostapd and retry */
-            net_exec_silent("pkill hostapd 2>/dev/null");
-            usleep(1000000); /* 1 second before retry */
+        /* Try minimal config on 2.4GHz */
+        generate_hostapd_conf(status, true);
+        if (try_hostapd_once(status, log_output, sizeof(log_output))) {
+            status->config.channel = saved_channel;
+            return true;
         }
+
+        status->config.channel = saved_channel;
     }
 
     /* All attempts failed — set detailed error message */
-    /* Strip newlines from log output for cleaner TUI display */
     for (char *p = log_output; *p; p++) {
         if (*p == '\n') *p = ' ';
     }
-    snprintf(status->error_msg, sizeof(status->error_msg),
-             "hostapd failed after %d attempts: %.350s", max_attempts, log_output);
+
+    if (channel_rejected && is_5ghz) {
+        snprintf(status->error_msg, sizeof(status->error_msg),
+                 "AP not supported on 5GHz (ch %d) or 2.4GHz by this driver. "
+                 "Try connecting to a 2.4GHz WiFi network first.",
+                 client_channel);
+    } else {
+        snprintf(status->error_msg, sizeof(status->error_msg),
+                 "hostapd failed: %.400s", log_output);
+    }
     return false;
 }
 
@@ -558,7 +638,7 @@ bool hotspot_start(HotspotStatus *status)
     }
 
     /* 4. Generate configs */
-    if (!generate_hostapd_conf(status)) {
+    if (!generate_hostapd_conf(status, false)) {
         snprintf(status->error_msg, sizeof(status->error_msg),
                  "Failed to generate hostapd configuration.");
         status->state = HS_STATE_ERROR;
