@@ -313,10 +313,16 @@ static void draw_dashboard(TuiState *tui)
         draw_label_value(y++, pad, lbl_w, "MAC:",
                          hs->wifi.mac[0] ? hs->wifi.mac : "N/A", CP_NORMAL);
 
-        char ch_str[16];
-        snprintf(ch_str, sizeof(ch_str), "%d", hs->wifi.channel);
+        char ch_str[32];
+        if (hs->wifi.channel > 0) {
+            snprintf(ch_str, sizeof(ch_str), "%d (%s)",
+                     hs->wifi.channel,
+                     hs->wifi.channel >= 32 ? "5 GHz" : "2.4 GHz");
+        } else {
+            snprintf(ch_str, sizeof(ch_str), "N/A");
+        }
         draw_label_value(y++, pad, lbl_w, "Channel:",
-                         hs->wifi.channel > 0 ? ch_str : "N/A", CP_NORMAL);
+                         ch_str, CP_NORMAL);
 
         char sig_str[32];
         snprintf(sig_str, sizeof(sig_str), "%d dBm", hs->wifi.signal_dbm);
@@ -443,8 +449,14 @@ static void draw_config(TuiState *tui)
         snprintf(field_values[CFG_CHANNEL], 64, "%d", cfg->channel);
     }
 
-    snprintf(field_values[CFG_BAND], 64, "%s",
-             cfg->use_5ghz ? "5 GHz" : "2.4 GHz");
+    /* Band is auto-detected from the client's channel */
+    int active_ch = cfg->channel > 0 ? cfg->channel :
+                    tui->hs_status->wifi.channel;
+    if (active_ch >= 32) {
+        snprintf(field_values[CFG_BAND_INFO], 64, "5 GHz (auto)");
+    } else {
+        snprintf(field_values[CFG_BAND_INFO], 64, "2.4 GHz (auto)");
+    }
     snprintf(field_values[CFG_MAX_CLIENTS], 64, "%d", cfg->max_clients);
     snprintf(field_values[CFG_HIDDEN], 64, "%s", cfg->hidden ? "Yes" : "No");
 
@@ -661,12 +673,12 @@ static void start_edit(TuiState *tui)
                 snprintf(tui->edit_buffer, MAX_SSID_LEN, "%d", cfg->channel);
             break;
         }
-        case CFG_BAND:
-            /* Toggle */
-            cfg->use_5ghz = !cfg->use_5ghz;
+        case CFG_BAND_INFO:
+            /* Read-only — band is auto-detected from client channel */
             tui->editing = false;
-            tui_log(tui, LOG_INFO, "Band changed to %s",
-                    cfg->use_5ghz ? "5 GHz" : "2.4 GHz");
+            tui_log(tui, LOG_INFO,
+                    "Band is auto-detected from WiFi channel. "
+                    "AP must use same band as client connection.");
             return;
         case CFG_MAX_CLIENTS:
             snprintf(tui->edit_buffer, MAX_SSID_LEN, "%d", cfg->max_clients);

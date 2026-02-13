@@ -51,7 +51,7 @@ typedef enum {
     CFG_SSID,
     CFG_PASSWORD,
     CFG_CHANNEL,
-    CFG_BAND,
+    CFG_BAND_INFO,       /* Read-only: auto-detected from client channel */
     CFG_MAX_CLIENTS,
     CFG_HIDDEN,
     CFG_FIELD_COUNT

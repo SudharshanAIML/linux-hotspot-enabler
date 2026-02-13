@@ -27,7 +27,6 @@ void hotspot_default_config(HotspotConfig *config)
     strncpy(config->ssid, "LinuxHotspot", MAX_SSID_LEN - 1);
     strncpy(config->password, "password123", MAX_SSID_LEN - 1);
     config->channel     = 0;  /* auto — match client */
-    config->use_5ghz    = false;
     config->max_clients = 10;
     config->hidden      = false;
 }
@@ -42,16 +41,35 @@ void hotspot_init(HotspotStatus *status)
 
 /* ── Generate hostapd config ─────────────────────────────────────────── */
 
+/*
+ * Auto-detect band from channel number:
+ *   Channels 1-14   → 2.4 GHz (hw_mode=g)
+ *   Channels 32-177  → 5 GHz   (hw_mode=a)
+ *
+ * With AP/STA concurrency on a single radio, the AP MUST use the
+ * same channel (and therefore same band) as the client connection.
+ * There is no manual 5GHz toggle — it's physically determined by
+ * which channel the client is connected on.
+ */
+static bool is_5ghz_channel(int ch)
+{
+    return (ch >= 32);
+}
+
 static bool generate_hostapd_conf(const HotspotStatus *status)
 {
     FILE *fp = fopen(HOSTAPD_CONF_PATH, "w");
     if (!fp) return false;
 
+    /* Channel: always match the WiFi client for AP/STA concurrency */
     int channel = status->config.channel;
     if (channel == 0) {
         channel = status->wifi.channel;
-        if (channel <= 0) channel = 6;
+        if (channel <= 0) channel = 6; /* safe fallback */
     }
+
+    bool use_5ghz = is_5ghz_channel(channel);
+    const char *hw_mode = use_5ghz ? "a" : "g";
 
     fprintf(fp,
         "interface=%s\n"
@@ -66,19 +84,21 @@ static bool generate_hostapd_conf(const HotspotStatus *status)
         "wpa=2\n"
         "wpa_passphrase=%s\n"
         "wpa_key_mgmt=WPA-PSK\n"
-        "wpa_pairwise=TKIP\n"
         "rsn_pairwise=CCMP\n"
         "ieee80211n=1\n",
         status->ap_iface,
         status->config.ssid,
-        status->config.use_5ghz ? "a" : "g",
+        hw_mode,
         channel,
         status->config.hidden ? 1 : 0,
         status->config.password
     );
 
-    if (status->config.use_5ghz) {
+    if (use_5ghz) {
         fprintf(fp, "ieee80211ac=1\n");
+        /* Regulatory: required for 5 GHz DFS channels */
+        fprintf(fp, "country_code=US\n");
+        fprintf(fp, "ieee80211d=1\n");
     }
 
     fclose(fp);
@@ -115,11 +135,20 @@ static bool generate_dnsmasq_conf(const HotspotStatus *status)
 
 #define NM_UNMANAGED_CONF "/etc/NetworkManager/conf.d/hotspot-enabler-unmanaged.conf"
 
+/*
+ * Cross-distro network manager handling:
+ *   - NetworkManager (Ubuntu, Fedora, Zorin, Mint, Arch GUI)
+ *   - connman (some lightweight distros)
+ *   - systemd-networkd (server distros)
+ *   - None (some minimal installs)
+ *
+ * All commands use 2>/dev/null so missing tools don't cause errors.
+ */
 static void nm_unmanage_interface(const char *ap_iface)
 {
     char cmd[MAX_CMD_LEN];
 
-    /* Write NM config to ignore the AP interface */
+    /* -- NetworkManager (most desktop Linux distros) -- */
     FILE *fp = fopen(NM_UNMANAGED_CONF, "w");
     if (fp) {
         fprintf(fp,
@@ -128,17 +157,18 @@ static void nm_unmanage_interface(const char *ap_iface)
             ap_iface);
         fclose(fp);
     }
-
-    /* Reload NM config */
     net_exec_silent("nmcli general reload conf 2>/dev/null");
     usleep(500000);
-
-    /* Also explicitly set unmanaged via nmcli */
     snprintf(cmd, sizeof(cmd),
              "nmcli device set %s managed no 2>/dev/null", ap_iface);
     net_exec_silent(cmd);
 
-    /* Disconnect wpa_supplicant from the AP interface */
+    /* -- connman (Raspberry Pi OS, some lightweight distros) -- */
+    snprintf(cmd, sizeof(cmd),
+             "connmanctl disable wifi %s 2>/dev/null", ap_iface);
+    net_exec_silent(cmd);
+
+    /* -- wpa_supplicant (may auto-attach to new interfaces) -- */
     snprintf(cmd, sizeof(cmd),
              "wpa_cli -i %s disconnect 2>/dev/null", ap_iface);
     net_exec_silent(cmd);

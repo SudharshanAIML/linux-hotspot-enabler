@@ -32,6 +32,7 @@ On most Linux distributions (including Zorin, Ubuntu, Mint), enabling a Wi-Fi ho
 | 🌍 **Cross-Distro**                | Ubuntu, Zorin, Debian, Mint, Arch, Fedora, RHEL & more      |
 | 👥 **Live Client Monitoring**      | See connected devices with IP, MAC, and hostname            |
 | 🔐 **WPA2 Security**               | Hotspot is password-protected with WPA2/CCMP                |
+| 🔄 **Auto Band Detection**         | Automatically matches client band (2.4/5 GHz)               |
 | 🧹 **Clean Shutdown**              | Properly removes virtual interfaces, NAT rules & temp files |
 | ⚙️ **Configurable**                | Edit SSID, password, channel, 5GHz mode, hidden network     |
 
@@ -58,7 +59,7 @@ On most Linux distributions (including Zorin, Ubuntu, Mint), enabling a Wi-Fi ho
 │ SSID:           LinuxHotspot                                                │
 │ Password:       ••••••••••••                                                │
 │ Channel:        Auto (match client)                                         │
-│ Band:           2.4 GHz                                                     │
+│ Band:           2.4 GHz (auto)                                              │
 │ Hidden:         No                                                          │
 │ Max Clients:    10                                                          │
 └─────────────────────────────────────────────────────────────────────────────┘
