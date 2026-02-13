@@ -234,6 +234,55 @@ static void nm_cleanup_unmanaged(void)
 /* ── Create Virtual AP Interface ─────────────────────────────────────── */
 
 /*
+ * Aggressively remove a stale AP interface.
+ * Returns true if the interface no longer exists.
+ */
+static bool force_remove_interface(const char *iface)
+{
+    char cmd[MAX_CMD_LEN];
+    char output[64] = {0};
+
+    /* Check if interface exists */
+    snprintf(cmd, sizeof(cmd), "ip link show %s 2>/dev/null", iface);
+    if (!net_exec_cmd(cmd, output, sizeof(output)) || strlen(output) == 0)
+        return true;  /* Already gone */
+
+    /* Step 1: Bring it DOWN */
+    snprintf(cmd, sizeof(cmd), "ip link set %s down 2>/dev/null", iface);
+    net_exec_silent(cmd);
+
+    /* Step 2: Flush addresses */
+    snprintf(cmd, sizeof(cmd), "ip addr flush dev %s 2>/dev/null", iface);
+    net_exec_silent(cmd);
+
+    /* Step 3: Detach wpa_supplicant from it */
+    snprintf(cmd, sizeof(cmd), "wpa_cli -i %s terminate 2>/dev/null", iface);
+    net_exec_silent(cmd);
+    snprintf(cmd, sizeof(cmd),
+             "rm -f /var/run/wpa_supplicant/%s /run/wpa_supplicant/%s 2>/dev/null",
+             iface, iface);
+    net_exec_silent(cmd);
+
+    /* Step 4: Tell NM to release it */
+    snprintf(cmd, sizeof(cmd), "nmcli device set %s managed no 2>/dev/null", iface);
+    net_exec_silent(cmd);
+    usleep(300000);
+
+    /* Step 5: Delete via iw */
+    snprintf(cmd, sizeof(cmd), "iw dev %s del 2>/dev/null", iface);
+    net_exec_silent(cmd);
+    usleep(500000);
+
+    /* Verify it's gone */
+    output[0] = '\0';
+    snprintf(cmd, sizeof(cmd), "ip link show %s 2>/dev/null", iface);
+    if (net_exec_cmd(cmd, output, sizeof(output)) && strlen(output) > 0)
+        return false;  /* Still exists */
+
+    return true;
+}
+
+/*
  * Creates the virtual AP interface and tells NM to ignore it.
  * Does NOT bring it up or assign IP — hostapd handles that.
  */
@@ -243,37 +292,54 @@ static bool create_ap_interface(HotspotStatus *status)
 
     /* Stop conflicting services */
     net_exec_silent("pkill hostapd 2>/dev/null");
-    snprintf(cmd, sizeof(cmd),
-             "pkill -f 'dnsmasq.*%s' 2>/dev/null", status->ap_iface);
-    net_exec_silent(cmd);
+    net_exec_silent("pkill -f 'dnsmasq.*hotspot_enabler' 2>/dev/null");
     net_exec_silent("rfkill unblock wifi 2>/dev/null");
     usleep(300000);
 
-    /* Remove ap0 if already exists */
-    snprintf(cmd, sizeof(cmd), "iw dev %s del >/dev/null 2>&1", status->ap_iface);
-    net_exec_silent(cmd);
-    usleep(500000);
+    /*
+     * Try to create an AP interface. If the default name (ap0) is
+     * stuck from a previous run, try ap1, ap2, ap3.
+     */
+    const char *ap_names[] = { "ap0", "ap1", "ap2", "ap3" };
+    int num_names = 4;
+    bool created = false;
 
-    /* Pre-configure NM to ignore the interface BEFORE creating it */
-    FILE *fp = fopen(NM_UNMANAGED_CONF, "w");
-    if (fp) {
-        fprintf(fp,
-            "[keyfile]\n"
-            "unmanaged-devices=interface-name:%s\n",
-            status->ap_iface);
-        fclose(fp);
-        net_exec_silent("nmcli general reload conf 2>/dev/null");
-        usleep(300000);
+    for (int i = 0; i < num_names; i++) {
+        const char *try_name = ap_names[i];
+
+        /* Try to remove any stale interface with this name */
+        force_remove_interface(try_name);
+
+        /* Pre-configure NM to ignore this interface BEFORE creating it */
+        FILE *fp = fopen(NM_UNMANAGED_CONF, "w");
+        if (fp) {
+            fprintf(fp,
+                "[keyfile]\n"
+                "unmanaged-devices=interface-name:%s\n",
+                try_name);
+            fclose(fp);
+            net_exec_silent("nmcli general reload conf 2>/dev/null");
+            usleep(300000);
+        }
+
+        /* Create virtual interface */
+        snprintf(cmd, sizeof(cmd),
+                 "iw dev %s interface add %s type __ap",
+                 status->wifi.name, try_name);
+
+        if (net_exec_silent(cmd) == 0) {
+            /* Success! Update the interface name in status */
+            strncpy(status->ap_iface, try_name, MAX_IFACE_NAME - 1);
+            created = true;
+            break;
+        }
     }
 
-    /* Create virtual interface */
-    snprintf(cmd, sizeof(cmd),
-             "iw dev %s interface add %s type __ap",
-             status->wifi.name, status->ap_iface);
-    if (net_exec_silent(cmd) != 0) {
+    if (!created) {
         snprintf(status->error_msg, sizeof(status->error_msg),
                  "Failed to create virtual AP interface. "
-                 "Your WiFi driver may not support AP/STA concurrency.");
+                 "All names (ap0-ap3) are in use or your driver "
+                 "doesn't support AP/STA concurrency.");
         return false;
     }
 
