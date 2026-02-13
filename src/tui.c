@@ -269,11 +269,11 @@ static void draw_footer(TuiState *tui)
     if (tui->current_screen == SCREEN_CONFIG && tui->editing) {
         hint = " [Enter] Save  [Esc] Cancel";
     } else if (tui->current_screen == SCREEN_DASHBOARD) {
-        hint = " [Enter] Start/Stop  [F1-F4] Screens  [q] Quit";
+        hint = " [Enter] Start/Stop  [Tab/Shift+Tab] Switch screens  [F1-F4] Screens  [q] Quit";
     } else if (tui->current_screen == SCREEN_CONFIG) {
-        hint = " [Up/Down] Select  [Enter] Edit  [F1-F4] Screens  [q] Quit";
+        hint = " [Up/Down] Select  [Enter] Edit  [Tab/Shift+Tab] Switch screens  [F1-F4] Screens  [q] Quit";
     } else {
-        hint = " [Up/Down] Scroll  [F1-F4] Screens  [q] Quit";
+        hint = " [Up/Down] Scroll  [Tab/Shift+Tab] Switch screens  [F1-F4] Screens  [q] Quit";
     }
 
     mvprintw(y, 1, "%s", hint);
@@ -857,7 +857,11 @@ void tui_run(TuiState *tui)
                 tui->current_screen = SCREEN_LOG;
                 break;
 
-            case '\t':
+            case KEY_BTAB: /* Shift+Tab (reverse) */
+                tui->current_screen = (tui->current_screen - 1 + SCREEN_COUNT) % SCREEN_COUNT;
+                break;
+
+            case '\t': /* Tab (forward) */
                 tui->current_screen = (tui->current_screen + 1) % SCREEN_COUNT;
                 break;
 
