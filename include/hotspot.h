@@ -30,7 +30,6 @@ typedef struct {
     char ssid[MAX_SSID_LEN];
     char password[MAX_SSID_LEN];
     int  channel;           /* 0 = auto (match client) */
-    bool use_5ghz;          /* false = 2.4GHz, true = 5GHz */
     int  max_clients;
     bool hidden;
 } HotspotConfig;
