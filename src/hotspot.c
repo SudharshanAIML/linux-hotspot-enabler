@@ -501,11 +501,11 @@ static bool try_hostapd_once(HotspotStatus *status, char *log_out, size_t log_sz
     prepare_for_hostapd(status->ap_iface);
 
     snprintf(cmd, sizeof(cmd),
-             "hostapd -B %s -f %s",
+             "hostapd -B %s -f %s >/dev/null 2>&1",
              HOSTAPD_CONF_PATH, HOSTAPD_LOG_PATH);
 
     if (net_exec_silent(cmd) == 0) {
-        usleep(2000000); /* 2 seconds for init */
+        usleep(1000000); /* 1 second for init */
 
         char output[64] = {0};
         net_exec_cmd("pidof hostapd", output, sizeof(output));
