@@ -88,6 +88,11 @@ int main(int argc, char *argv[])
     /* 3. Init hotspot status */
     hotspot_init(&g_hs_status);
 
+    /* Load saved config if present */
+    if (hotspot_load_config(&g_hs_status.config)) {
+        printf("  ✓ Loaded saved config: SSID: %s\n", g_hs_status.config.ssid);
+    }
+
     /* 4. Detect WiFi interface */
     if (!net_detect_wifi_interface(&g_hs_status.wifi)) {
         printf("  ✗ No WiFi interface detected!\n");

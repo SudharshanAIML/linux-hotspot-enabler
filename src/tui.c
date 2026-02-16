@@ -686,9 +686,15 @@ static void start_edit(TuiState *tui)
         case CFG_HIDDEN:
             /* Toggle */
             cfg->hidden = !cfg->hidden;
+            /* Persist */
+            if (hotspot_save_config(cfg)) {
+                tui_log(tui, LOG_INFO, "Hidden SSID: %s (saved)",
+                        cfg->hidden ? "Yes" : "No");
+            } else {
+                tui_log(tui, LOG_WARN, "Hidden SSID: %s (save failed)",
+                        cfg->hidden ? "Yes" : "No");
+            }
             tui->editing = false;
-            tui_log(tui, LOG_INFO, "Hidden SSID: %s",
-                    cfg->hidden ? "Yes" : "No");
             return;
         default:
             tui->editing = false;
@@ -705,13 +711,21 @@ static void save_edit(TuiState *tui)
         case CFG_SSID:
             if (strlen(tui->edit_buffer) > 0) {
                 strncpy(cfg->ssid, tui->edit_buffer, MAX_SSID_LEN - 1);
-                tui_log(tui, LOG_INFO, "SSID changed to: %s", cfg->ssid);
+                if (hotspot_save_config(cfg)) {
+                    tui_log(tui, LOG_INFO, "SSID changed to: %s (saved)", cfg->ssid);
+                } else {
+                    tui_log(tui, LOG_WARN, "SSID changed to: %s (save failed)", cfg->ssid);
+                }
             }
             break;
         case CFG_PASSWORD:
             if (strlen(tui->edit_buffer) >= 8) {
                 strncpy(cfg->password, tui->edit_buffer, MAX_SSID_LEN - 1);
-                tui_log(tui, LOG_INFO, "Password updated.");
+                if (hotspot_save_config(cfg)) {
+                    tui_log(tui, LOG_INFO, "Password updated (saved).");
+                } else {
+                    tui_log(tui, LOG_WARN, "Password updated (save failed).");
+                }
             } else {
                 tui_log(tui, LOG_WARN, "Password must be at least 8 characters.");
             }
@@ -720,8 +734,13 @@ static void save_edit(TuiState *tui)
             int ch = atoi(tui->edit_buffer);
             if (ch >= 0 && ch <= 196) {
                 cfg->channel = ch;
-                tui_log(tui, LOG_INFO, "Channel set to %s",
-                        ch == 0 ? "Auto" : tui->edit_buffer);
+                if (hotspot_save_config(cfg)) {
+                    tui_log(tui, LOG_INFO, "Channel set to %s (saved)",
+                            ch == 0 ? "Auto" : tui->edit_buffer);
+                } else {
+                    tui_log(tui, LOG_WARN, "Channel set to %s (save failed)",
+                            ch == 0 ? "Auto" : tui->edit_buffer);
+                }
             } else {
                 tui_log(tui, LOG_WARN, "Invalid channel (0=auto, 1-14 for 2.4GHz)");
             }
@@ -731,7 +750,11 @@ static void save_edit(TuiState *tui)
             int mc = atoi(tui->edit_buffer);
             if (mc > 0 && mc <= 255) {
                 cfg->max_clients = mc;
-                tui_log(tui, LOG_INFO, "Max clients set to %d", mc);
+                if (hotspot_save_config(cfg)) {
+                    tui_log(tui, LOG_INFO, "Max clients set to %d (saved)", mc);
+                } else {
+                    tui_log(tui, LOG_WARN, "Max clients set to %d (save failed)", mc);
+                }
             } else {
                 tui_log(tui, LOG_WARN, "Invalid max clients (1-255)");
             }

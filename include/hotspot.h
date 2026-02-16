@@ -23,6 +23,7 @@
 #define DNSMASQ_CONF_PATH "/tmp/hotspot_enabler_dnsmasq.conf"
 #define DNSMASQ_LEASE_FILE "/tmp/hotspot_enabler_dnsmasq.leases"
 #define HOSTAPD_LOG_PATH  "/tmp/hotspot_enabler_hostapd.log"
+#define HOTSPOT_CONFIG_PATH "/etc/hotspot_enabler.conf"
 
 /* ── Hotspot Configuration ───────────────────────────────────────────── */
 
@@ -78,6 +79,10 @@ void hotspot_refresh_status(HotspotStatus *status);
 
 /* Get uptime string (e.g., "1h 23m 45s") */
 void hotspot_get_uptime_str(const HotspotStatus *status, char *buf, size_t bufsize);
+
+/* Load/save persistent hotspot config */
+bool hotspot_load_config(HotspotConfig *config);
+bool hotspot_save_config(const HotspotConfig *config);
 
 /* Clean up everything (called on exit/signal) */
 void hotspot_cleanup(HotspotStatus *status);

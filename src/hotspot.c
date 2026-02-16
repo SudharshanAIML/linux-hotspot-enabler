@@ -17,6 +17,9 @@
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <limits.h>
 
 #include "hotspot.h"
 
@@ -37,6 +40,88 @@ void hotspot_init(HotspotStatus *status)
     status->state = HS_STATE_STOPPED;
     strncpy(status->ap_iface, AP_IFACE_NAME, MAX_IFACE_NAME - 1);
     hotspot_default_config(&status->config);
+}
+
+/* ── Persistent configuration (simple key=value file) ─────────────── */
+
+/* Save hotspot config atomically to HOTSPOT_CONFIG_PATH with 0600 perms. */
+bool hotspot_save_config(const HotspotConfig *config)
+{
+    char tmp_path[PATH_MAX];
+    int fd = -1;
+    FILE *fp = NULL;
+
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmpXXXXXX", HOTSPOT_CONFIG_PATH);
+    fd = mkstemp(tmp_path);
+    if (fd < 0) return false;
+
+    /* Set strict permissions */
+    fchmod(fd, S_IRUSR | S_IWUSR);
+
+    fp = fdopen(fd, "w");
+    if (!fp) {
+        close(fd);
+        unlink(tmp_path);
+        return false;
+    }
+
+    fprintf(fp, "ssid=%s\n", config->ssid);
+    fprintf(fp, "password=%s\n", config->password);
+    fprintf(fp, "channel=%d\n", config->channel);
+    fprintf(fp, "max_clients=%d\n", config->max_clients);
+    fprintf(fp, "hidden=%d\n", config->hidden ? 1 : 0);
+
+    fflush(fp);
+    fsync(fd);
+    fclose(fp);
+
+    if (rename(tmp_path, HOTSPOT_CONFIG_PATH) != 0) {
+        unlink(tmp_path);
+        return false;
+    }
+
+    return true;
+}
+
+/* Load persisted config (returns true if file existed and values applied) */
+bool hotspot_load_config(HotspotConfig *config)
+{
+    FILE *fp = fopen(HOTSPOT_CONFIG_PATH, "r");
+    if (!fp) return false;
+
+    char line[512];
+    bool any = false;
+    while (fgets(line, sizeof(line), fp)) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        if (line[0] == '#' || line[0] == '\0') continue;
+
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        char *key = line;
+        char *val = eq + 1;
+
+        if (strcmp(key, "ssid") == 0) {
+            strncpy(config->ssid, val, MAX_SSID_LEN - 1);
+            any = true;
+        } else if (strcmp(key, "password") == 0) {
+            strncpy(config->password, val, MAX_SSID_LEN - 1);
+            any = true;
+        } else if (strcmp(key, "channel") == 0) {
+            config->channel = atoi(val);
+            any = true;
+        } else if (strcmp(key, "max_clients") == 0) {
+            config->max_clients = atoi(val);
+            any = true;
+        } else if (strcmp(key, "hidden") == 0) {
+            config->hidden = (atoi(val) != 0);
+            any = true;
+        }
+    }
+
+    fclose(fp);
+    return any;
 }
 
 /* ── Generate hostapd config ─────────────────────────────────────────── */
