@@ -604,7 +604,21 @@ static bool start_hostapd(HotspotStatus *status)
         if (*p == '\n') *p = ' ';
     }
 
-    if (channel_rejected && is_5ghz) {
+    /* Detect specific nl80211 driver initialization failure */
+    bool nl80211_failed = (strstr(log_output, "nl80211") != NULL &&
+                           (strstr(log_output, "Could not set interface") != NULL ||
+                            strstr(log_output, "driver initialization failed") != NULL));
+
+    if (nl80211_failed) {
+        snprintf(status->error_msg, sizeof(status->error_msg),
+                 "hostapd failed: %.200s "
+                 "This usually means your WiFi adapter does not support "
+                 "AP/STA concurrency (running hotspot while connected). "
+                 "Solutions: 1) Use a USB WiFi adapter with AP support, "
+                 "2) Disconnect from WiFi before starting hotspot, "
+                 "3) Check 'iw list' for 'AP' in interface combinations.",
+                 log_output);
+    } else if (channel_rejected && is_5ghz) {
         snprintf(status->error_msg, sizeof(status->error_msg),
                  "AP not supported on 5GHz (ch %d) or 2.4GHz by this driver. "
                  "Try connecting to a 2.4GHz WiFi network first.",
@@ -695,6 +709,26 @@ bool hotspot_start(HotspotStatus *status)
                  "Cannot determine physical WiFi device.");
         status->state = HS_STATE_ERROR;
         return false;
+    }
+
+    /* 2b. Check AP/STA concurrency support (warn but don't fail) */
+    if (!net_check_ap_sta_concurrency(status->phy)) {
+        /*
+         * Some adapters report limited support but still work.
+         * We proceed but log a warning. If hostapd fails, the user
+         * will get a more detailed error about hardware limitations.
+         */
+        if (!status->wifi.supports_ap) {
+            snprintf(status->error_msg, sizeof(status->error_msg),
+                     "Your WiFi adapter (%s) may not support AP mode "
+                     "while connected as a client. Try: 1) Use a USB WiFi "
+                     "adapter with AP support (e.g., Ralink/MediaTek chipsets), "
+                     "2) Disconnect from WiFi first, or 3) Check driver support "
+                     "with 'iw list | grep -A 10 \"valid interface combinations\"'",
+                     status->wifi.name);
+            status->state = HS_STATE_ERROR;
+            return false;
+        }
     }
 
     /* 3. Create virtual AP interface (does NOT bring it up) */

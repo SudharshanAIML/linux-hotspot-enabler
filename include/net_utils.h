@@ -87,6 +87,9 @@ bool net_refresh_wifi_status(WifiInterface *iface);
 /* Check if interface supports AP/STA concurrency */
 bool net_check_ap_support(const char *phy);
 
+/* Check if interface supports simultaneous AP+Station mode */
+bool net_check_ap_sta_concurrency(const char *phy);
+
 /* Get the phy device name for an interface */
 bool net_get_phy_name(const char *iface, char *phy, size_t physize);
 

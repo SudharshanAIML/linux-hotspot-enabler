@@ -296,6 +296,47 @@ bool net_get_phy_name(const char *iface, char *phy, size_t physize)
 
 /* ── AP/STA Concurrency Check ────────────────────────────────────────── */
 
+/*
+ * Check if the adapter supports AP/STA concurrency (running AP while
+ * connected as a client). This is more strict than just AP support.
+ */
+bool net_check_ap_sta_concurrency(const char *phy)
+{
+    char cmd[MAX_CMD_LEN];
+    char output[4096];
+
+    /*
+     * Look for "valid interface combinations" that explicitly allow
+     * both "managed" (station) and "AP" simultaneously.
+     * 
+     * Example output we're looking for:
+     *   valid interface combinations:
+     *     * #{ managed } <= 1, #{ AP } <= 1,
+     *       total <= 2, #channels <= 1
+     */
+    snprintf(cmd, sizeof(cmd),
+             "iw phy %s info 2>/dev/null "
+             "| grep -A 20 'valid interface combinations:'",
+             phy);
+    output[0] = '\0';
+    net_exec_cmd(cmd, output, sizeof(output));
+    
+    if (strlen(output) > 0) {
+        /* Need both managed AND AP in the same combination block */
+        bool has_managed = (strstr(output, "managed") != NULL);
+        bool has_ap      = (strstr(output, "AP") != NULL);
+        
+        /* Check for common concurrency patterns */
+        bool has_combo = (strstr(output, "#{ managed }") != NULL &&
+                          strstr(output, "#{ AP }") != NULL);
+        
+        if (has_managed && has_ap && has_combo)
+            return true;
+    }
+
+    return false;
+}
+
 bool net_check_ap_support(const char *phy)
 {
     char cmd[MAX_CMD_LEN];
