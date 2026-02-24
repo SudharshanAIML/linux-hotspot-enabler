@@ -81,41 +81,30 @@ On most Linux distributions (including Zorin, Ubuntu, Mint), enabling a Wi-Fi ho
 
 ### Install Dependencies
 
-<details>
+
 <summary><b>🟠 Ubuntu / Zorin / Debian / Linux Mint</b></summary>
 
 ```bash
 sudo apt update && sudo apt install -y iw hostapd dnsmasq iptables libncurses-dev build-essential
 ```
 
-</details>
-
-<details>
 <summary><b>🔵 Arch Linux / Manjaro</b></summary>
 
 ```bash
 sudo pacman -Sy --noconfirm iw hostapd dnsmasq iptables ncurses base-devel
 ```
-
-</details>
-
-<details>
 <summary><b>🔴 Fedora / RHEL / CentOS</b></summary>
 
 ```bash
 sudo dnf install -y iw hostapd dnsmasq iptables ncurses-devel gcc make
 ```
 
-</details>
-
-<details>
 <summary><b>🟢 openSUSE</b></summary>
 
 ```bash
 sudo zypper install -y iw hostapd dnsmasq iptables ncurses-devel gcc make
 ```
 
-</details>
 
 ---
 
